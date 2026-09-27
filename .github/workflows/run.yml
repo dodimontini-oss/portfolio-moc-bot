@@ -1,0 +1,46 @@
+name: Portfolio bot (A1 + D + TSY-ME, MOC)
+
+# Primary trigger: an external scheduler POSTs workflow_dispatch (mode=session) at 15:35 and 15:42 America/New_York
+# on weekdays (GitHub's own cron is often hours late). The cron below is only a fallback: the bot itself refuses to
+# trade outside the pre-close window (close-25min .. close-11min), so a late fallback run is a harmless no-op.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "session = normal run (trades only inside the pre-close window); dryrun-now = compute and log targets right now, place nothing"
+        type: choice
+        options: [session, dryrun-now]
+        default: dryrun-now
+  schedule:
+    - cron: "35,42 19,20 * * 1-5"
+
+concurrency:
+  group: portfolio-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    if: ${{ vars.BOT_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt
+      - name: Dry run now (manual check)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'dryrun-now' }}
+        run: python portfolio_bot.py
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          DRY_RUN: "1"
+          FORCE_WINDOW: "1"
+      - name: Session run
+        if: ${{ github.event_name == 'schedule' || inputs.mode == 'session' }}
+        run: python portfolio_bot.py
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          DRY_RUN: ${{ vars.DRY_RUN || '0' }}
