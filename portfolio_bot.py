@@ -179,7 +179,11 @@ def run(api, strategy, now=None, dry_run=False, force_window=False):
     today = now.date()
     cal_days, close_times = trading_calendar(api, today)
     if pd.Timestamp(today) not in cal_days:
-        log.info("%s is not a trading day - nothing to do", today); return {"status": "holiday"}
+        if not (force_window and dry_run):
+            log.info("%s is not a trading day - nothing to do", today); return {"status": "holiday"}
+        today = cal_days[cal_days <= pd.Timestamp(today)][-1].date()      # manual dry run on a weekend/holiday:
+        log.warning("dry run on a non-trading day: evaluating as of %s with its last prices", today)   # use the last session
+        now = datetime.combine(today, datetime.strptime(close_times[pd.Timestamp(today)], "%H:%M").time(), NY)
     close_dt = datetime.combine(today, datetime.strptime(close_times[pd.Timestamp(today)], "%H:%M").time(), NY)
     win_open, win_close = close_dt - timedelta(minutes=WINDOW_OPEN_MIN), close_dt - timedelta(minutes=WINDOW_CLOSE_MIN)
     if not (win_open <= now <= win_close):
