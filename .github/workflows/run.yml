@@ -1,10 +1,9 @@
-name: Strategy bots (A1 / D / TSY-ME, MOC, 3 accounts)
+name: Portfolio bot (A1 + D + TSY-ME, MOC, one account)
 
-# Three independent bots, one per dedicated Alpaca PAPER account. One trigger runs all three in parallel.
+# All three strategies in ONE dedicated Alpaca PAPER account, 1/3 of equity each, positions netted per symbol.
 # Primary trigger: an external scheduler POSTs workflow_dispatch (mode=session) at 15:35 and 15:42 America/New_York on
 # weekdays (GitHub's own cron is often hours late). The cron below is only a fallback: each bot refuses to trade
 # outside its pre-close window (close-25min .. close-11min), so a late fallback run is a harmless no-op.
-# A strategy whose secrets are not set yet is skipped with a warning.
 on:
   workflow_dispatch:
     inputs:
@@ -21,17 +20,13 @@ jobs:
     if: ${{ vars.BOT_ENABLED != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        bot: [A1, D, TSY]
     concurrency:
-      group: strategy-bot-${{ matrix.bot }}
+      group: portfolio-bot
       cancel-in-progress: false
     env:
-      STRATEGY: ${{ matrix.bot }}
-      ALPACA_API_KEY: ${{ secrets[format('ALPACA_API_KEY_{0}', matrix.bot)] }}
-      ALPACA_SECRET_KEY: ${{ secrets[format('ALPACA_SECRET_KEY_{0}', matrix.bot)] }}
+      STRATEGY: ALL
+      ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

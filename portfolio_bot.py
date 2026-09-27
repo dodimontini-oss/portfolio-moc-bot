@@ -1,6 +1,7 @@
 """
-Strategy bot for ONE of: A1 index mean reversion | D asset rotation | TSY month-end  - Alpaca PAPER only.
-Each strategy runs at full size (100% of its own dedicated account); pick it with env STRATEGY=A1|D|TSY.
+Strategy bot: A1 index mean reversion + D asset rotation + TSY month-end  - Alpaca PAPER only.
+STRATEGY=ALL (default): all three in ONE dedicated account, 1/3 of equity each, positions netted per symbol.
+STRATEGY=A1|D|TSY: a single strategy at full size in its own dedicated account.
 
 How it works (one run per trading day, ~15:35-15:48 ET):
   1. Checks it is a trading day and inside the pre-close window (close-25min .. close-11min, so half-days work too).
@@ -11,7 +12,7 @@ How it works (one run per trading day, ~15:35-15:48 ET):
 It is STATELESS: targets are recomputed from market data every run, so a missed day is caught up on the next run.
 It REQUIRES A DEDICATED ACCOUNT: it aborts if it finds positions/orders it does not recognise.
 
-Env: STRATEGY (A1|D|TSY), ALPACA_API_KEY, ALPACA_SECRET_KEY (if empty the strategy is "not configured" and the run
+Env: STRATEGY (ALL|A1|D|TSY, default ALL), ALPACA_API_KEY, ALPACA_SECRET_KEY (if empty the strategy is "not configured" and the run
      exits cleanly); DRY_RUN=1 (compute + log, place nothing);
      FORCE_WINDOW=1 (ignore the time window - for dry-run testing only; refused unless DRY_RUN=1).
 """
@@ -28,11 +29,18 @@ NY = ZoneInfo("America/New_York")
 DRIFT_BAND = 0.25          # re-size an existing holding only when it drifts >25% from target (same as replay)
 WINDOW_OPEN_MIN, WINDOW_CLOSE_MIN = 25, 11   # minutes before the close
 HISTORY_DAYS = 420
-STRATEGIES = ("A1", "D", "TSY")
+STRATEGIES = ("ALL", "A1", "D", "TSY")
 
 
 def prefix_for(strategy):
-    return f"pf{strategy.lower()}"                      # client_order_id prefix: pfa1- / pfd- / pftsy-
+    return "pf" if strategy == "ALL" else f"pf{strategy.lower()}"    # client_order_id prefix: pf- / pfa1- / pfd- / pftsy-
+
+
+def config_for(strategy):
+    """(symbols, order prefix, sleeves) for a STRATEGY value."""
+    if strategy == "ALL":
+        return R.ALL_SYMBOLS, prefix_for(strategy), dict(R.SLEEVE)
+    return R.UNIVERSE[strategy], prefix_for(strategy), {strategy: 1.0}
 
 log = logging.getLogger("portfolio_bot")
 
@@ -166,7 +174,7 @@ def check_dedicated(positions, open_orders, symbols, prefix):
 def run(api, strategy, now=None, dry_run=False, force_window=False):
     if strategy not in STRATEGIES:
         raise ValueError(f"STRATEGY must be one of {STRATEGIES}, got {strategy!r}")
-    symbols, prefix, sleeves = R.UNIVERSE[strategy], prefix_for(strategy), {strategy: 1.0}
+    symbols, prefix, sleeves = config_for(strategy)
     now = now or datetime.now(NY)
     today = now.date()
     cal_days, close_times = trading_calendar(api, today)
@@ -195,7 +203,8 @@ def run(api, strategy, now=None, dry_run=False, force_window=False):
     prices = {s: float(data[s].close.iloc[-1]) for s in symbols}
     orders, notes = plan_orders(w, pw, equity, prices, positions, oo, today, symbols, prefix)
 
-    log.info("[%s] equity %.2f | holding after today's close: %s", strategy, equity, detail[strategy] or "nothing (cash)")
+    for k in (("A1", "D", "TSY") if strategy == "ALL" else (strategy,)):
+        log.info("[%s] equity %.2f | %s holds after today's close: %s", strategy, equity, k, detail[k] or "nothing (cash)")
     log.info("target weights: %s", {k: round(v, 4) for k, v in w.items() if v})
     log.info("gross target %.3f", sum(w.values()))
     for n in notes:
@@ -217,7 +226,7 @@ def main():
     force = os.getenv("FORCE_WINDOW", "0") == "1"
     if force and not dry:
         log.error("FORCE_WINDOW requires DRY_RUN=1 - refusing"); sys.exit(2)
-    strategy = os.getenv("STRATEGY", "")
+    strategy = os.getenv("STRATEGY", "ALL") or "ALL"
     key, secret = os.getenv("ALPACA_API_KEY", ""), os.getenv("ALPACA_SECRET_KEY", "")
     if not key or not secret:
         log.warning("[%s] not configured (no ALPACA_API_KEY/SECRET for this strategy) - skipping", strategy)
