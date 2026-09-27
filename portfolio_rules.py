@@ -88,30 +88,39 @@ def d_selection(closes, t, calendar=None):
 
 
 # ------------------------------------------------------------------ combined
-def target_weights(data, t, calendar=None, a1_cache=None):
+UNIVERSE = {"A1": A1_UNIVERSE, "D": D_UNIVERSE, "TSY": TSY_UNIVERSE}
+
+
+def target_weights(data, t, calendar=None, a1_cache=None, sleeves=None):
     """data: dict symbol -> DataFrame(open, high, low, close) indexed by date (day t may be a provisional bar).
+    sleeves: {strategy: fraction of equity}; defaults to SLEEVE. A strategy with sleeve 0 is not computed.
     Returns (weights dict symbol->fraction of equity, detail dict for logging)."""
+    sl = SLEEVE if sleeves is None else sleeves
     w = {s: 0.0 for s in ALL_SYMBOLS}
     detail = {"A1": [], "D": [], "TSY": []}
     # A1
-    for s in A1_UNIVERSE:
+    for s in (A1_UNIVERSE if sl.get("A1", 0) > 0 else []):
         df = data[s].loc[:t]
         if len(df) < 30 or df.index[-1] != t:
             continue
         pos = a1_cache[s][df.index.get_loc(t)] if a1_cache is not None else a1_positions(df)[-1]
         if pos:
-            w[s] += SLEEVE["A1"] * A1_W
+            w[s] += sl["A1"] * A1_W
             detail["A1"].append(s)
     # TSY
-    pfe = month_position_from_end([t], calendar if calendar is not None else data["TLT"].index)[0]
+    pfe = 0
+    if sl.get("TSY", 0) > 0:
+        pfe = month_position_from_end([t], calendar if calendar is not None else data["TLT"].index)[0]
     if 2 <= pfe <= TSY_ENTRY_FROM_END:
         for s in TSY_UNIVERSE:
-            w[s] += SLEEVE["TSY"] / len(TSY_UNIVERSE)
+            w[s] += sl["TSY"] / len(TSY_UNIVERSE)
             detail["TSY"].append(s)
     # D
+    if sl.get("D", 0) <= 0:
+        return w, detail
     closes = pd.DataFrame({s: data[s].close for s in D_UNIVERSE})
     picks = d_selection(closes, t, calendar if calendar is not None else closes.index)
     for s in picks:
-        w[s] += SLEEVE["D"] / D_TOPK
+        w[s] += sl["D"] / D_TOPK
         detail["D"].append(s)
     return w, detail

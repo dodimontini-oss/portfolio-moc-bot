@@ -1,8 +1,10 @@
-name: Portfolio bot (A1 + D + TSY-ME, MOC)
+name: Strategy bots (A1 / D / TSY-ME, MOC, 3 accounts)
 
-# Primary trigger: an external scheduler POSTs workflow_dispatch (mode=session) at 15:35 and 15:42 America/New_York
-# on weekdays (GitHub's own cron is often hours late). The cron below is only a fallback: the bot itself refuses to
-# trade outside the pre-close window (close-25min .. close-11min), so a late fallback run is a harmless no-op.
+# Three independent bots, one per dedicated Alpaca PAPER account. One trigger runs all three in parallel.
+# Primary trigger: an external scheduler POSTs workflow_dispatch (mode=session) at 15:35 and 15:42 America/New_York on
+# weekdays (GitHub's own cron is often hours late). The cron below is only a fallback: each bot refuses to trade
+# outside its pre-close window (close-25min .. close-11min), so a late fallback run is a harmless no-op.
+# A strategy whose secrets are not set yet is skipped with a warning.
 on:
   workflow_dispatch:
     inputs:
@@ -14,15 +16,22 @@ on:
   schedule:
     - cron: "35,42 19,20 * * 1-5"
 
-concurrency:
-  group: portfolio-bot
-  cancel-in-progress: false
-
 jobs:
   run:
     if: ${{ vars.BOT_ENABLED != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        bot: [A1, D, TSY]
+    concurrency:
+      group: strategy-bot-${{ matrix.bot }}
+      cancel-in-progress: false
+    env:
+      STRATEGY: ${{ matrix.bot }}
+      ALPACA_API_KEY: ${{ secrets[format('ALPACA_API_KEY_{0}', matrix.bot)] }}
+      ALPACA_SECRET_KEY: ${{ secrets[format('ALPACA_SECRET_KEY_{0}', matrix.bot)] }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,14 +42,10 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'dryrun-now' }}
         run: python portfolio_bot.py
         env:
-          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
-          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
           DRY_RUN: "1"
           FORCE_WINDOW: "1"
       - name: Session run
         if: ${{ github.event_name == 'schedule' || inputs.mode == 'session' }}
         run: python portfolio_bot.py
         env:
-          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
-          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
           DRY_RUN: ${{ vars.DRY_RUN || '0' }}

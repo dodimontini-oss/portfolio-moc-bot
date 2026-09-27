@@ -1,5 +1,6 @@
 """
-3-strategy portfolio bot (A1 index mean reversion + D asset rotation + TSY month-end) - Alpaca PAPER only.
+Strategy bot for ONE of: A1 index mean reversion | D asset rotation | TSY month-end  - Alpaca PAPER only.
+Each strategy runs at full size (100% of its own dedicated account); pick it with env STRATEGY=A1|D|TSY.
 
 How it works (one run per trading day, ~15:35-15:48 ET):
   1. Checks it is a trading day and inside the pre-close window (close-25min .. close-11min, so half-days work too).
@@ -10,7 +11,8 @@ How it works (one run per trading day, ~15:35-15:48 ET):
 It is STATELESS: targets are recomputed from market data every run, so a missed day is caught up on the next run.
 It REQUIRES A DEDICATED ACCOUNT: it aborts if it finds positions/orders it does not recognise.
 
-Env: ALPACA_API_KEY, ALPACA_SECRET_KEY (required); DRY_RUN=1 (compute + log, place nothing);
+Env: STRATEGY (A1|D|TSY), ALPACA_API_KEY, ALPACA_SECRET_KEY (if empty the strategy is "not configured" and the run
+     exits cleanly); DRY_RUN=1 (compute + log, place nothing);
      FORCE_WINDOW=1 (ignore the time window - for dry-run testing only; refused unless DRY_RUN=1).
 """
 import os, sys, math, json, time, logging
@@ -26,7 +28,11 @@ NY = ZoneInfo("America/New_York")
 DRIFT_BAND = 0.25          # re-size an existing holding only when it drifts >25% from target (same as replay)
 WINDOW_OPEN_MIN, WINDOW_CLOSE_MIN = 25, 11   # minutes before the close
 HISTORY_DAYS = 420
-ORDER_PREFIX = "pf"
+STRATEGIES = ("A1", "D", "TSY")
+
+
+def prefix_for(strategy):
+    return f"pf{strategy.lower()}"                      # client_order_id prefix: pfa1- / pfd- / pftsy-
 
 log = logging.getLogger("portfolio_bot")
 
@@ -81,13 +87,13 @@ class Alpaca:
 
 
 # ---------------------------------------------------------------- data assembly
-def build_data(api, today):
+def build_data(api, today, symbols):
     """dict symbol -> DataFrame(open, high, low, close) with a provisional row for `today` from the live snapshot."""
     start = today - timedelta(days=int(HISTORY_DAYS * 1.5))
-    raw = api.daily_bars(R.ALL_SYMBOLS, start, today - timedelta(days=1))
-    snaps = api.snapshots(R.ALL_SYMBOLS)
+    raw = api.daily_bars(symbols, start, today - timedelta(days=1))
+    snaps = api.snapshots(symbols)
     data = {}
-    for s in R.ALL_SYMBOLS:
+    for s in symbols:
         bars = raw.get(s, [])
         df = pd.DataFrame([{"date": pd.Timestamp(b["t"][:10]), "open": b["o"], "high": b["h"], "low": b["l"],
                             "close": b["c"]} for b in bars]).set_index("date") if bars else \
@@ -117,11 +123,11 @@ def trading_calendar(api, today):
 
 
 # ---------------------------------------------------------------- order planning (pure, unit-tested)
-def plan_orders(weights, prev_weights, equity, prices, positions, open_orders, today):
+def plan_orders(weights, prev_weights, equity, prices, positions, open_orders, today, symbols, prefix):
     """Returns (orders, notes). positions: {sym: qty}. open_orders: list of Alpaca order dicts."""
     notes, orders = [], []
-    pending = {o["symbol"] for o in open_orders if o.get("client_order_id", "").startswith(f"{ORDER_PREFIX}-{today:%Y%m%d}")}
-    for s in R.ALL_SYMBOLS:
+    pending = {o["symbol"] for o in open_orders if o.get("client_order_id", "").startswith(f"{prefix}-{today:%Y%m%d}")}
+    for s in symbols:
         w, pw = weights.get(s, 0.0), prev_weights.get(s, 0.0)
         q = int(positions.get(s, 0))
         px = prices[s]
@@ -143,21 +149,24 @@ def plan_orders(weights, prev_weights, equity, prices, positions, open_orders, t
         if qty <= 0:
             continue
         orders.append({"symbol": s, "qty": str(qty), "side": side, "type": "market", "time_in_force": "cls",
-                       "client_order_id": f"{ORDER_PREFIX}-{today:%Y%m%d}-{s}-{side}"})
+                       "client_order_id": f"{prefix}-{today:%Y%m%d}-{s}-{side}"})
         notes.append(f"{s}: target w={w:.4f} ({tq} sh) held {q} -> {side} {qty}")
     return orders, notes
 
 
-def check_dedicated(positions, open_orders):
-    foreign = [p["symbol"] for p in positions if p["symbol"] not in R.ALL_SYMBOLS]
-    foreign += [o["symbol"] for o in open_orders if not o.get("client_order_id", "").startswith(ORDER_PREFIX + "-")]
+def check_dedicated(positions, open_orders, symbols, prefix):
+    foreign = [p["symbol"] for p in positions if p["symbol"] not in symbols]
+    foreign += [o["symbol"] for o in open_orders if not o.get("client_order_id", "").startswith(prefix + "-")]
     shorts = [p["symbol"] for p in positions if float(p["qty"]) < 0]
     if foreign or shorts:
         raise RuntimeError(f"account is not dedicated to this bot: foreign={foreign} shorts={shorts} - aborting, nothing placed")
 
 
 # ---------------------------------------------------------------- main
-def run(api, now=None, dry_run=False, force_window=False):
+def run(api, strategy, now=None, dry_run=False, force_window=False):
+    if strategy not in STRATEGIES:
+        raise ValueError(f"STRATEGY must be one of {STRATEGIES}, got {strategy!r}")
+    symbols, prefix, sleeves = R.UNIVERSE[strategy], prefix_for(strategy), {strategy: 1.0}
     now = now or datetime.now(NY)
     today = now.date()
     cal_days, close_times = trading_calendar(api, today)
@@ -171,23 +180,22 @@ def run(api, now=None, dry_run=False, force_window=False):
             return {"status": "outside_window"}
         log.warning("FORCE_WINDOW in dry run: evaluating outside the window with the latest prices")
 
-    data = build_data(api, today)
+    data = build_data(api, today, symbols)
     t = pd.Timestamp(today)
-    w, detail = R.target_weights(data, t, calendar=cal_days)
+    w, detail = R.target_weights(data, t, calendar=cal_days, sleeves=sleeves)
     yday = cal_days[cal_days < t][-1]
     hist = {s: df.loc[:yday] for s, df in data.items()}
-    pw, _ = R.target_weights(hist, yday, calendar=cal_days)
+    pw, _ = R.target_weights(hist, yday, calendar=cal_days, sleeves=sleeves)
 
     acct = api.account()
     equity = float(acct["equity"])
     pos_list, oo = api.positions(), api.open_orders()
-    check_dedicated(pos_list, oo)
+    check_dedicated(pos_list, oo, symbols, prefix)
     positions = {p["symbol"]: float(p["qty"]) for p in pos_list}
-    prices = {s: float(data[s].close.iloc[-1]) for s in R.ALL_SYMBOLS}
-    orders, notes = plan_orders(w, pw, equity, prices, positions, oo, today)
+    prices = {s: float(data[s].close.iloc[-1]) for s in symbols}
+    orders, notes = plan_orders(w, pw, equity, prices, positions, oo, today, symbols, prefix)
 
-    log.info("equity %.2f | A1 in: %s | D picks: %s | TSY window: %s", equity, detail["A1"] or "-", detail["D"] or "-",
-             "yes" if detail["TSY"] else "no")
+    log.info("[%s] equity %.2f | holding after today's close: %s", strategy, equity, detail[strategy] or "nothing (cash)")
     log.info("target weights: %s", {k: round(v, 4) for k, v in w.items() if v})
     log.info("gross target %.3f", sum(w.values()))
     for n in notes:
@@ -209,8 +217,13 @@ def main():
     force = os.getenv("FORCE_WINDOW", "0") == "1"
     if force and not dry:
         log.error("FORCE_WINDOW requires DRY_RUN=1 - refusing"); sys.exit(2)
-    api = Alpaca(os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"])
-    out = run(api, dry_run=dry, force_window=force)
+    strategy = os.getenv("STRATEGY", "")
+    key, secret = os.getenv("ALPACA_API_KEY", ""), os.getenv("ALPACA_SECRET_KEY", "")
+    if not key or not secret:
+        log.warning("[%s] not configured (no ALPACA_API_KEY/SECRET for this strategy) - skipping", strategy)
+        return
+    api = Alpaca(key, secret)
+    out = run(api, strategy, dry_run=dry, force_window=force)
     print(json.dumps({k: v for k, v in out.items() if k != "placed"}, default=str))
 
 
