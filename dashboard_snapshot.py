@@ -58,6 +58,38 @@ def closed_trades(orders):
     return closed
 
 
+def strategy_sleeves(orders, equity):
+    """Per-strategy shadow ledger (attribution.py) from the first fill to the last COMPLETED session."""
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    import pandas as pd
+    import attribution, portfolio_bot as PB, portfolio_rules as R
+    ny = ZoneInfo("America/New_York")
+    fills = [o for o in orders if (o.get("client_order_id") or "").startswith("pf-") and o.get("filled_at")
+             and float(o.get("filled_qty") or 0) > 0]
+    empty = {sl: {"name": attribution.NAMES[sl], "realized_pl": 0.0, "unrealized_pl": 0.0, "closed_trades_count": 0,
+                  "open_positions": []} for sl in attribution.SLEEVES}
+    if not fills:
+        return {"sleeves": empty, "attribution_note": "no fills yet"}
+    fill_px = {}
+    for o in fills:
+        d = pd.Timestamp(pd.Timestamp(o["filled_at"]).tz_convert(ny).date())
+        fill_px[(d, o["symbol"])] = float(o["filled_avg_price"])
+    start = min(d for d, _ in fill_px)
+    now = datetime.now(ny)
+    last_done = now.date() if now.hour * 60 + now.minute >= 16 * 60 + 20 else now.date() - timedelta(days=1)
+    api = PB.Alpaca(os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"])
+    raw = api.daily_bars(R.ALL_SYMBOLS, (start - pd.Timedelta(days=640)).date(), last_done)
+    data = {s: pd.DataFrame([{"date": pd.Timestamp(b["t"][:10]), "open": b["o"], "high": b["h"], "low": b["l"],
+                              "close": b["c"]} for b in raw.get(s, [])]).set_index("date") for s in R.ALL_SYMBOLS}
+    cal, _ = PB.trading_calendar(api, last_done)
+    led = attribution.sleeve_ledger(data, cal, start, pd.Timestamp(last_done), fill_px, STARTING_EQUITY)
+    shadow = sum(v["realized_pl"] + v["unrealized_pl"] for v in led.values())
+    return {"sleeves": led, "attribution_as_of": str(last_done),
+            "attribution_gap": (equity - STARTING_EQUITY) - shadow,
+            "attribution_note": "Per-strategy split is a shadow ledger at actual MOC fill prices; gap = real account P&L minus the sum of the three"}
+
+
 def run():
     acct = get("/v2/account")
     equity = float(acct["equity"])
@@ -71,6 +103,10 @@ def run():
     unreal = sum(p["unrealized_pl"] for p in positions)
     pending = [{"symbol": o["symbol"], "side": o["side"], "qty": o["qty"], "type": f'{o["type"]}/{o["time_in_force"]}'}
                for o in get("/v2/orders", {"status": "open", "limit": 500})]
+    try:
+        attrib = strategy_sleeves(orders, equity)
+    except Exception as e:                      # attribution must never break the main snapshot
+        attrib = {"attribution_error": f"{type(e).__name__}: {e}"[:300]}
     snap = {
         "bot_id": BOT_ID, "label": BOT_LABEL, "broker": "Alpaca (stocks)", "currency": "USD",
         "config": "A1 + D + TSY-ME · 1/3 each · MOC",
@@ -80,6 +116,7 @@ def run():
         "realized_pl_basis": "Gross execution P&L (FIFO per symbol); broker fees excluded",
         "starting_equity": STARTING_EQUITY,
         "open_positions": positions, "pending_orders": pending, "closed_trades": trades,
+        **attrib,
     }
     print("===SNAPSHOT_JSON_START===")
     print(json.dumps(snap))
