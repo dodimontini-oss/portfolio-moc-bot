@@ -79,7 +79,10 @@ def strategy_sleeves(orders, equity):
     now = datetime.now(ny)
     last_done = now.date() if now.hour * 60 + now.minute >= 16 * 60 + 20 else now.date() - timedelta(days=1)
     api = PB.Alpaca(os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"])
-    raw = api.daily_bars(R.ALL_SYMBOLS, (start - pd.Timedelta(days=640)).date(), last_done)
+    # the free data plan refuses SIP data from the last 15 minutes: when today's session is included, stop 16 min ago
+    bars_end = (datetime.now(timezone.utc) - timedelta(minutes=16)).strftime("%Y-%m-%dT%H:%M:%SZ") \
+        if last_done == now.date() else last_done
+    raw = api.daily_bars(R.ALL_SYMBOLS, (start - pd.Timedelta(days=640)).date(), bars_end)
     data = {s: pd.DataFrame([{"date": pd.Timestamp(b["t"][:10]), "open": b["o"], "high": b["h"], "low": b["l"],
                               "close": b["c"]} for b in raw.get(s, [])]).set_index("date") for s in R.ALL_SYMBOLS}
     cal, _ = PB.trading_calendar(api, last_done)
