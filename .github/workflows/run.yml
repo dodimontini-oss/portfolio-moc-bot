@@ -1,4 +1,4 @@
-name: Portfolio bot (A1 + D + TSY-ME, MOC, one account)
+name: Portfolio bot (A1 + D + TSY-ME, pre-close market orders, one account)
 
 # All three strategies in ONE dedicated Alpaca PAPER account, 1/3 of equity each, positions netted per symbol.
 # Primary trigger: an external scheduler POSTs workflow_dispatch (mode=session) at 15:35 and 15:42 America/New_York on

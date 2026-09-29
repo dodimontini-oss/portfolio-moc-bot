@@ -8,7 +8,10 @@ How it works (one run per trading day, ~15:35-15:48 ET):
   2. Pulls ~400 days of adjusted daily bars (SIP history through yesterday) + today's live IEX snapshot, which stands
      in for today's close (validated: a 15:50 estimate matches the true-close A1 signal ~98.5% of days).
   3. Computes target weights with portfolio_rules.target_weights() - the same function the replay backtest uses.
-  4. Sends MARKET-ON-CLOSE orders (time_in_force="cls") for the differences between target and current shares.
+  4. Sends plain MARKET orders (time_in_force="day") for the differences between target and current shares, inside the
+     pre-close window. (Market-on-close was used first, but Alpaca PAPER has no closing auction: on 2026-09-28 it
+     filled MOC orders only partially and expired the rest. Market orders fill in full; the price is ~15-25 min
+     before the backtested close, which is negligible for these ETFs.)
 It is STATELESS: targets are recomputed from market data every run, so a missed day is caught up on the next run.
 It REQUIRES A DEDICATED ACCOUNT: it aborts if it finds positions/orders it does not recognise.
 
@@ -141,7 +144,7 @@ def plan_orders(weights, prev_weights, equity, prices, positions, open_orders, t
         px = prices[s]
         tq = int(math.floor(w * equity / px)) if w > 0 else 0
         if s in pending:
-            notes.append(f"{s}: MOC order already queued today - skip"); continue
+            notes.append(f"{s}: order already open today - skip"); continue
         if w == 0:
             trade = q != 0
         else:
@@ -156,7 +159,7 @@ def plan_orders(weights, prev_weights, equity, prices, positions, open_orders, t
             qty = q
         if qty <= 0:
             continue
-        orders.append({"symbol": s, "qty": str(qty), "side": side, "type": "market", "time_in_force": "cls",
+        orders.append({"symbol": s, "qty": str(qty), "side": side, "type": "market", "time_in_force": "day",
                        "client_order_id": f"{prefix}-{today:%Y%m%d}-{s}-{side}"})
         notes.append(f"{s}: target w={w:.4f} ({tq} sh) held {q} -> {side} {qty}")
     return orders, notes

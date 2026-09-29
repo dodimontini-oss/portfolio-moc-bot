@@ -4,7 +4,7 @@ Three strategies from the Sept-2026 research (`Desktop/BOT/research_2026_09/FINA
 dedicated Alpaca **paper** account: 1/3 of equity per strategy, positions netted per symbol (SPY, TLT and IEF are
 shared), never more than 100% invested, never short.
 
-| Strategy | Rule (all orders market-on-close) |
+| Strategy | Rule (orders: plain market orders at ~15:35 ET) |
 |---|---|
 | A1 index mean reversion (SPY QQQ IWM DIA MDY, 20% of its third each) | buy when close < SMA10 − 1.5×ATR10; sell at the first close > prior day's high, or after 10 days |
 | D asset rotation (SPY EFA EEM TLT IEF GLD DBC VNQ) | last trading day of month: hold the top-3 by 126-day return (only if > 0), 1/3 of its third each |
